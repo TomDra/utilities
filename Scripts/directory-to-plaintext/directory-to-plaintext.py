@@ -4,6 +4,60 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import hashlib
 
+# Simple tooltip class for Tkinter widgets
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.id = None
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(500, self.showtip)
+
+    def unschedule(self):
+        if self.id:
+            self.widget.after_cancel(self.id)
+            self.id = None
+
+    def showtip(self):
+        if self.tipwindow or not self.text:
+            return
+        x, y, cx, cy = self.widget.bbox("insert") or (0, 0, 0, 0)
+        x = x + self.widget.winfo_rootx() + 25
+        y = y + self.widget.winfo_rooty() + 20
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            tw,
+            text=self.text,
+            justify=tk.LEFT,
+            background="#ffffe0",  # Light yellow background
+            foreground="#000000",  # Black text for max contrast
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=("tahoma", "8", "normal"),
+        )
+        label.pack(ipadx=4, ipady=2)
+
+    def hidetip(self):
+        if self.tipwindow:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
+
 def safe_listdir(path):
     try:
         return sorted(os.listdir(path))
@@ -44,6 +98,7 @@ def hash_folder_content(path):
 def update_output(*args):
     if not selected_folder[0]:
         copy_button.config(state="disabled")
+        status_label.config(text="No folder selected")
         return
 
     folder_path = selected_folder[0]
@@ -81,7 +136,6 @@ def update_output(*args):
     elif format_selected == "CSV":
         output = "\n".join(raw_paths)
     elif format_selected == "HTML":
-        # Faster HTML generation using list append and join
         def html_tree(json_tree):
             html_parts = ["<ul>"]
             for name, subtree in json_tree.items():
@@ -106,9 +160,12 @@ def update_output(*args):
     else:
         output = "Unknown format selected."
 
+    text_area.config(state=tk.NORMAL)
     text_area.delete("1.0", tk.END)
     text_area.insert(tk.END, output)
+    text_area.config(state=tk.DISABLED)
     copy_button.config(state="normal")
+    status_label.config(text=f"Folder: {folder_path}")
 
 def select_folder():
     folder_path = filedialog.askdirectory()
@@ -116,7 +173,7 @@ def select_folder():
         selected_folder[0] = folder_path
         refresh_cache()
         update_output()
-        start_auto_refresh()  # start auto-refresh timer
+        start_auto_refresh()
 
 def refresh_cache():
     folder_path = selected_folder[0]
@@ -130,14 +187,12 @@ def auto_refresh_check():
     if folder_path:
         current_hash = hash_folder_content(folder_path)
         if current_hash != folder_tree_cache.get("hash"):
-            # Folder changed — refresh cache and update output
             refresh_cache()
             update_output()
-    # Schedule next check in 5 seconds
+            status_label.config(text=f"Folder changed: {folder_path} (Auto-refreshed)")
     root.after(5000, auto_refresh_check)
 
 def start_auto_refresh():
-    # Start the periodic auto-refresh loop if not already running
     if not getattr(root, "_auto_refresh_running", False):
         root._auto_refresh_running = True
         root.after(5000, auto_refresh_check)
@@ -169,31 +224,43 @@ root = tk.Tk()
 root.title("Folder Tree Viewer")
 root.minsize(700, 600)
 
-selected_folder = [None]  # Mutable container to store folder path
-folder_tree_cache = {"raw": [], "json": {}, "hash": None}  # Cache including content hash
+selected_folder = [None]
+folder_tree_cache = {"raw": [], "json": {}, "hash": None}
 
-frame = tk.Frame(root, padx=20, pady=20)
-frame.pack()
+# Use a nicer font for entire app
+default_font = ("Segoe UI", 10)
 
-tk.Button(frame, text="Select Folder", command=select_folder).pack(pady=5)
+frame = tk.Frame(root, padx=20, pady=10)
+frame.pack(fill=tk.X)
 
-tk.Label(frame, text="Choose output format:").pack()
+btn_select = tk.Button(frame, text="Select Folder", command=select_folder, font=default_font)
+btn_select.pack(side=tk.LEFT)
+ToolTip(btn_select, "Select a folder to display its tree structure")
+
+tk.Label(frame, text="Output Format:", font=default_font).pack(side=tk.LEFT, padx=(20, 5))
 
 format_var = tk.StringVar(value="Plaintext")
 formats = ["Raw", "Plaintext", "Markdown", "JSON", "CSV", "HTML", "XML"]
 for fmt in formats:
-    tk.Radiobutton(frame, text=fmt, variable=format_var, value=fmt, command=update_output).pack(anchor="w")
+    rb = tk.Radiobutton(frame, text=fmt, variable=format_var, value=fmt, command=update_output, font=default_font)
+    rb.pack(side=tk.LEFT, padx=5)
 
-text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=80, height=25, font=("Courier", 10))
-text_area.pack(padx=20, pady=10)
+text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=90, height=30, font=("Consolas", 11),
+                                      bg="#1e1e1e", fg="#d4d4d4", insertbackground="white", state=tk.DISABLED)
+text_area.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
 
-button_frame = tk.Frame(root)
-button_frame.pack(pady=5)
+button_frame = tk.Frame(root, pady=10)
+button_frame.pack()
 
-copy_button = tk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard, state="disabled")
+copy_button = tk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard, state="disabled", font=default_font)
 copy_button.pack(side=tk.LEFT, padx=10)
+ToolTip(copy_button, "Copy the displayed output to clipboard")
 
-save_button = tk.Button(button_frame, text="Save to File", command=save_to_file)
+save_button = tk.Button(button_frame, text="Save to File", command=save_to_file, font=default_font)
 save_button.pack(side=tk.LEFT, padx=10)
+ToolTip(save_button, "Save the displayed output to a text file")
+
+status_label = tk.Label(root, text="No folder selected", font=("Segoe UI", 9), fg="gray")
+status_label.pack(pady=(0, 10))
 
 root.mainloop()
