@@ -2,6 +2,7 @@ import os
 import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
+import hashlib
 
 def safe_listdir(path):
     try:
@@ -10,70 +11,35 @@ def safe_listdir(path):
         return [f"[Error reading {path}: {e}]"]
 
 def get_folder_tree_raw(path):
-    paths = [os.path.join(root_dir, name)
-             for root_dir, dirs, files in os.walk(path)
-             for name in dirs + files]
-    return paths
+    return [os.path.join(root, name) for root, dirs, files in os.walk(path) for name in dirs + files]
 
-
-def get_folder_tree_text(path, indent=""):
-    output = []
-    items = safe_listdir(path)
-    for i, item in enumerate(items):
-        full_path = os.path.join(path, item)
-        prefix = "└── " if i == len(items) - 1 else "├── "
-        output.append(indent + prefix + item)
-        if os.path.isdir(full_path):
-            extension = "    " if i == len(items) - 1 else "│   "
-            output.extend(get_folder_tree_text(full_path, indent + extension))
-    return output
-
-def get_folder_tree_markdown(path, level=0):
-    md_lines = []
-    for item in safe_listdir(path):
-        full_path = os.path.join(path, item)
-        md_lines.append(f"{'  ' * level}- {item}")
-        if os.path.isdir(full_path):
-            md_lines.extend(get_folder_tree_markdown(full_path, level + 1))
-    return md_lines
-
-def get_folder_tree_json(path):
+def build_tree_json(path):
     tree = {}
     for item in safe_listdir(path):
         full_path = os.path.join(path, item)
         if os.path.isdir(full_path):
-            tree[item] = get_folder_tree_json(full_path)
+            tree[item] = build_tree_json(full_path)
         else:
             tree[item] = None
     return tree
 
-def get_folder_tree_csv(path):
-    return [os.path.join(root, name) for root, dirs, files in os.walk(path) for name in dirs + files]
-
-def get_folder_tree_html(path):
-    def build_ul(path):
-        items = safe_listdir(path)
-        html = "<ul>"
-        for item in items:
-            full_path = os.path.join(path, item)
-            html += f"<li>{item}"
-            if os.path.isdir(full_path):
-                html += build_ul(full_path)
-            html += "</li>"
-        html += "</ul>"
-        return html
-    return [build_ul(path)]
-
-def get_folder_tree_xml(path, indent=""):
-    lines = []
-    for item in safe_listdir(path):
-        full_path = os.path.join(path, item)
-        tag = "folder" if os.path.isdir(full_path) else "file"
-        lines.append(f"{indent}<{tag} name=\"{item}\">")
-        if os.path.isdir(full_path):
-            lines.extend(get_folder_tree_xml(full_path, indent + "  "))
-        lines.append(f"{indent}</{tag}>")
-    return lines
+def hash_folder_content(path):
+    """
+    Generate a hash representing the folder content for change detection.
+    It walks the folder and hashes paths + file modification times.
+    """
+    hash_md5 = hashlib.md5()
+    for root, dirs, files in os.walk(path):
+        for name in sorted(dirs + files):
+            full_path = os.path.join(root, name)
+            try:
+                stat = os.stat(full_path)
+                hash_md5.update(full_path.encode('utf-8'))
+                hash_md5.update(str(stat.st_mtime).encode('utf-8'))
+                hash_md5.update(str(stat.st_size).encode('utf-8'))
+            except Exception:
+                continue
+    return hash_md5.hexdigest()
 
 def update_output(*args):
     if not selected_folder[0]:
@@ -84,27 +50,59 @@ def update_output(*args):
     base_name = os.path.basename(folder_path)
     format_selected = format_var.get()
 
+    raw_paths = folder_tree_cache["raw"]
+    tree_json = folder_tree_cache["json"]
+
     if format_selected == "Raw":
-        raw_paths = get_folder_tree_raw(folder_path)
         output = "[\n" + ",\n".join(f"    {repr(p)}" for p in raw_paths) + "\n]"
     elif format_selected == "Plaintext":
-        tree_lines = [base_name] + get_folder_tree_text(folder_path)
-        output = "\n".join(tree_lines)
+        def text_tree(json_tree, indent=""):
+            lines = []
+            items = list(json_tree.items())
+            for i, (name, subtree) in enumerate(items):
+                prefix = "└── " if i == len(items) - 1 else "├── "
+                lines.append(indent + prefix + name)
+                if subtree is not None:
+                    extension = "    " if i == len(items) - 1 else "│   "
+                    lines.extend(text_tree(subtree, indent + extension))
+            return lines
+        output = "\n".join([base_name] + text_tree(tree_json))
     elif format_selected == "Markdown":
-        md_lines = ["# " + base_name] + get_folder_tree_markdown(folder_path)
-        output = "\n".join(md_lines)
+        def md_tree(json_tree, level=0):
+            lines = []
+            for name, subtree in json_tree.items():
+                lines.append(f"{'  ' * level}- {name}")
+                if subtree is not None:
+                    lines.extend(md_tree(subtree, level + 1))
+            return lines
+        output = "\n".join(["# " + base_name] + md_tree(tree_json))
     elif format_selected == "JSON":
-        tree_dict = {base_name: get_folder_tree_json(folder_path)}
-        output = json.dumps(tree_dict, indent=2)
+        output = json.dumps({base_name: tree_json}, indent=2)
     elif format_selected == "CSV":
-        csv_lines = get_folder_tree_csv(folder_path)
-        output = "\n".join(csv_lines)
+        output = "\n".join(raw_paths)
     elif format_selected == "HTML":
-        html_lines = get_folder_tree_html(folder_path)
-        output = "\n".join(html_lines)
+        # Faster HTML generation using list append and join
+        def html_tree(json_tree):
+            html_parts = ["<ul>"]
+            for name, subtree in json_tree.items():
+                html_parts.append(f"<li>{name}")
+                if subtree is not None:
+                    html_parts.append(html_tree(subtree))
+                html_parts.append("</li>")
+            html_parts.append("</ul>")
+            return "".join(html_parts)
+        output = html_tree(tree_json)
     elif format_selected == "XML":
-        xml_lines = [f"<folder name=\"{base_name}\">"] + get_folder_tree_xml(folder_path, "  ") + [f"</folder>"]
-        output = "\n".join(xml_lines)
+        def xml_tree(name, subtree, indent="  "):
+            lines = [f'{indent}<folder name="{name}">']
+            for child_name, child_tree in subtree.items():
+                if child_tree is None:
+                    lines.append(f'{indent}  <file name="{child_name}" />')
+                else:
+                    lines.extend(xml_tree(child_name, child_tree, indent + "  "))
+            lines.append(f'{indent}</folder>')
+            return lines
+        output = "\n".join([f'<folder name="{base_name}">'] + xml_tree(base_name, tree_json, "  ")[1:])
     else:
         output = "Unknown format selected."
 
@@ -116,7 +114,33 @@ def select_folder():
     folder_path = filedialog.askdirectory()
     if folder_path:
         selected_folder[0] = folder_path
+        refresh_cache()
         update_output()
+        start_auto_refresh()  # start auto-refresh timer
+
+def refresh_cache():
+    folder_path = selected_folder[0]
+    if folder_path:
+        folder_tree_cache["raw"] = get_folder_tree_raw(folder_path)
+        folder_tree_cache["json"] = build_tree_json(folder_path)
+        folder_tree_cache["hash"] = hash_folder_content(folder_path)
+
+def auto_refresh_check():
+    folder_path = selected_folder[0]
+    if folder_path:
+        current_hash = hash_folder_content(folder_path)
+        if current_hash != folder_tree_cache.get("hash"):
+            # Folder changed — refresh cache and update output
+            refresh_cache()
+            update_output()
+    # Schedule next check in 5 seconds
+    root.after(5000, auto_refresh_check)
+
+def start_auto_refresh():
+    # Start the periodic auto-refresh loop if not already running
+    if not getattr(root, "_auto_refresh_running", False):
+        root._auto_refresh_running = True
+        root.after(5000, auto_refresh_check)
 
 def copy_to_clipboard():
     content = text_area.get("1.0", tk.END).strip()
@@ -146,6 +170,7 @@ root.title("Folder Tree Viewer")
 root.minsize(700, 600)
 
 selected_folder = [None]  # Mutable container to store folder path
+folder_tree_cache = {"raw": [], "json": {}, "hash": None}  # Cache including content hash
 
 frame = tk.Frame(root, padx=20, pady=20)
 frame.pack()
